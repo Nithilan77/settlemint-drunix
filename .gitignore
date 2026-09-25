@@ -1,0 +1,32 @@
+# --- Vendor clone: never committed here ---
+# drunix/ is a separate clone of https://github.com/npci/drunix (Fabric fork
+# + drunix-network test-network). It carries its own git history, and every
+# time network/net.sh brings the network up it generates real, live private
+# keys and MSP/TLS material under drunix-network/test-network/{crypto-config,
+# organizations,channel-artifacts}/ — those must never leave this machine.
+# See README.md "Getting drunix/" for how a teammate gets their own copy.
+/drunix/
+
+# --- Go build artifacts ---
+# `go mod vendor` runs automatically as part of every chaincode deploy
+# (network.sh's packageCC.sh) and drops a full copy of every dependency's
+# source under vendor/ — regenerated on demand, never hand-maintained.
+vendor/
+*.test
+
+# --- Local env / secrets (none exist yet; future-proofing for gateway/web) ---
+.env
+.env.*
+!.env.example
+
+# --- Chaincode packaging scratch (produced by test-network scripts if run
+# from inside our own tree; normally these land in drunix/, not here, but
+# ignore them here too in case a packaging command is ever run from here) ---
+*.tar.gz
+log.txt
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
