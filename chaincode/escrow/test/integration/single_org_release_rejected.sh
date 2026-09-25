@@ -30,13 +30,60 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "${SCRIPT_DIR}/common.sh"
 
+# common.sh does `set -euo pipefail` (it wants -e for its own callers). Sourcing
+# runs in this shell, so that silently overrides the `-e`-less `set` above and
+# defeats the comment's whole point: a failure in setup (InitiateEscrow/LockEscrow)
+# would abort the script on the spot, with no message, before it even reaches
+# step 3. Re-assert our intended options now that sourcing is done.
+set +e -uo pipefail
+
+# --- Precheck: fail loud, fail first -----------------------------------
+# Without this, a down network makes the InitiateEscrow invoke below fail deep
+# inside do_invoke -> ccutils.sh's chaincodeInvoke, whose retry output and final
+# `fatalln` both go to *stdout* (plain `echo`, not `echo >&2` — see utils.sh),
+# which is exactly the stream `do_invoke ... >/dev/null` throws away. Net result
+# used to be: this script prints its header + escrow ID line, then dies in
+# silence. Check reachability before printing anything test-specific.
+require_network_up() {
+  local missing=()
+  local name
+  for name in orderer.example.com lp1.org1 lp1.org2; do
+    if ! docker ps --filter "name=^${name}$" --filter "status=running" --format '{{.Names}}' 2>/dev/null | grep -qx "${name}"; then
+      missing+=("${name}")
+    fi
+  done
+  if [ "${#missing[@]}" -gt 0 ]; then
+    c_red "Network is down — container(s) not running: ${missing[*]}"
+    c_red "Run the network bootstrap first (see README.md / network/net.sh up), then re-run this test."
+    exit 3
+  fi
+  if ! { exec 3<>"/dev/tcp/localhost/7050"; } 2>/dev/null; then
+    c_red "Network is down — nothing listening on localhost:7050 (orderer)."
+    c_red "Run the network bootstrap first (see README.md / network/net.sh up), then re-run this test."
+    exit 3
+  fi
+  exec 3<&-
+}
+require_network_up
+
 ESCROW_ID="test-single-org-reject-$(date +%s)"
 
 c_blue "=== Primary test: single-org-endorsed RELEASE must be REJECTED ==="
 c_blue "Escrow ID: ${ESCROW_ID}"
 
-do_invoke "{\"Args\":[\"InitiateEscrow\",\"${ESCROW_ID}\",\"100000\",\"payer-acct-reject\",\"payee-acct-reject\"]}" >/dev/null
-do_invoke "{\"Args\":[\"LockEscrow\",\"${ESCROW_ID}\"]}" >/dev/null
+init_out="$(do_invoke "{\"Args\":[\"InitiateEscrow\",\"${ESCROW_ID}\",\"100000\",\"payer-acct-reject\",\"payee-acct-reject\"]}" 2>&1)"
+if [ $? -ne 0 ]; then
+  c_red "SETUP FAILED: InitiateEscrow invoke did not succeed:"
+  printf '%s\n' "${init_out}"
+  exit 2
+fi
+
+lock_out="$(do_invoke "{\"Args\":[\"LockEscrow\",\"${ESCROW_ID}\"]}" 2>&1)"
+if [ $? -ne 0 ]; then
+  c_red "SETUP FAILED: LockEscrow invoke did not succeed:"
+  printf '%s\n' "${lock_out}"
+  exit 2
+fi
 
 before="$(read_state "${ESCROW_ID}")"
 c_blue "State before single-org release attempt: ${before}"

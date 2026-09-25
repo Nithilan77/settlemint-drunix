@@ -293,3 +293,70 @@ reveals it didn't take effect. This is exactly the "core guarantee" test's proof
 strategy - see `chaincode/escrow/test/integration/single_org_release_rejected.sh`.
 
 ---
+
+## 2026-09-25 - Bug found + fixed: `single_org_release_rejected.sh` died silently (header, then nothing) when the network was down
+
+A live re-run of `chaincode/escrow/test/integration/single_org_release_rejected.sh` printed only
+the `=== Primary test ===` banner and the `Escrow ID: ...` line, then returned to the prompt -
+no "before" state, no attempt, no PASS/FAIL. `docker ps` showed **zero** running containers
+(`docker ps -a` showed the full 11-container stack all `Exited (255)` a few minutes earlier) -
+the network had simply been brought down. That alone should have produced a loud error; instead
+it produced silence, for two stacking reasons:
+
+1. **`-e` leaked in via `source`.** The script deliberately runs `set -uo pipefail` (no `-e`,
+   with a comment explaining step 3 is expected to fail/warn). It then sources `common.sh`,
+   which runs `set -euo pipefail` - sourcing executes in the *same* shell, so this silently
+   re-enables `-e` for the rest of the script, undoing the author's own protection before it
+   ever reaches step 3. The very first failing command anywhere (in this case the setup
+   `InitiateEscrow` invoke) now aborted the whole script on the spot.
+2. **All the diagnostic output is on stdout, and stdout is exactly what got thrown away.**
+   `ccutils.sh`'s `chaincodeInvoke` redirects its retries to `log.txt` then `cat`s it, and its
+   `fatalln`/`errorln`/`println` helpers (`utils.sh`) are plain `echo`, not `echo >&2` - so even
+   the final `"After $MAX_RETRY attempts, Invoke result ... INVALID!"` message is stdout, not
+   stderr. The test script wraps its setup invokes in `do_invoke ... >/dev/null` specifically to
+   hide routine chatter - with everything on stdout, that redirect also ate the fatal error.
+
+Net effect: `InitiateEscrow` retried against a dead network for `MAX_RETRY x DELAY` seconds,
+failed, printed its failure to a stream piped to `/dev/null`, returned exit 1, and the
+now-inherited `-e` killed the script immediately - before `before=`, before the attempt, before
+any PASS/FAIL line. Upstream-issue material for `ccutils.sh` (diagnostics belong on stderr, not
+stdout) but fixed locally in our own script rather than touching the vendored one, same policy as
+the `$DELAY`-unset and no-`--waitForEvent` bugs above.
+
+**Fix applied to `single_org_release_rejected.sh`:**
+- Re-assert `set +e -uo pipefail` immediately after sourcing `common.sh`, so the script's own
+  intended option state (no `-e`) actually holds for the rest of the run.
+- Added a `require_network_up` precheck, run *before* the escrow ID is even generated: checks
+  `orderer.example.com` / `lp1.org1` / `lp1.org2` are `docker ps`-running, and that
+  `localhost:7050` (orderer) actually accepts a TCP connection (bash's `/dev/tcp/...` - confirmed
+  working under this Git-Bash). On failure it prints a one-line "network is down - run bootstrap
+  first" message and exits (code 3) before anything test-specific is printed.
+- The `InitiateEscrow`/`LockEscrow` setup invokes now capture their combined output into a
+  variable instead of `>/dev/null`; on a non-zero exit the script prints that captured output and
+  exits (code 2) with a clear `SETUP FAILED` message, instead of relying on `-e` to abort silently.
+
+Re-verified after the fix: run against the still-down network correctly printed the network-down
+message and exited 3 *before* printing an escrow ID (confirms the silent-death path is closed).
+
+**Bringing the network back up:** `network/net.sh bootstrap` (`up` -> `create-channel` ->
+`deploy-cc`) got the 11-container stack running cleanly (same flow as the Phase 0 entry above),
+but `create-channel` then failed: `docker down` earlier had only *stopped* containers, not
+removed their volumes, so the orderer/peers still had `mychannel`'s ledger from the prior
+session on disk. `network.sh`'s createChannel isn't idempotent against that - it tried to
+regenerate the genesis block and rejoin, and failed with `ledger [mychannel] already exists with
+state [ACTIVE]` / `cannot join: channel already exists`. Not a new bug worth a full workaround
+entry - checked directly instead: `docker ps` showed all 11 core containers **and** the
+`dev-peer0.org{1,2}.example.com-escrow_1.0-...` chaincode containers already `Up`, and
+`network/net.sh query '{"Args":["ReadEscrow","test-single-org-reject-1790329467"]}' escrow`
+returned the exact row from `docs/demo-evidence/03-yugabyte-sql-state.md` - so the channel and
+`escrow` chaincode were already fully live from before; `bootstrap` just didn't need to be run at
+all in this case.
+
+**Re-ran the patched script against the live network: PASS.** Fresh escrow
+`test-single-org-reject-1790341936` - `LOCKED` before, single-org-endorsed `ReleaseEscrow`
+returned `status:200` (proposal-simulation "success", as expected and explained in-script),
+still `LOCKED` after -> `PASS: single-org-endorsed release was REJECTED`, exit code 0. Confirms
+the fix didn't just add error handling for its own sake - the underlying test still exercises and
+proves the real guarantee once the network is actually reachable.
+
+---
