@@ -30,11 +30,15 @@ TEST_NETWORK_DIR="${DRUNIX_ROOT}/drunix-network/test-network"
 BUILD_BIN="${DRUNIX_ROOT}/build/bin"
 
 CHANNEL_NAME="${CHANNEL_NAME:-mychannel}"
-CC_NAME="${CC_NAME:-basic}"
-CC_SRC_PATH="${CC_SRC_PATH:-../asset-transfer-basic/chaincode-go}"  # relative to TEST_NETWORK_DIR
+# Defaults deploy OUR escrow chaincode, with the dual-org endorsement policy
+# it requires (see chaincode/escrow/escrow.go). To deploy the stock sample
+# instead: CC_NAME=basic CC_SRC_PATH=../asset-transfer-basic/chaincode-go
+# CC_END_POLICY= ./network/net.sh deploy-cc
+CC_NAME="${CC_NAME:-escrow}"
+CC_SRC_PATH="${CC_SRC_PATH:-../../../chaincode/escrow}"  # relative to TEST_NETWORK_DIR
 CC_VERSION="${CC_VERSION:-1.0}"
 CC_SEQUENCE="${CC_SEQUENCE:-auto}"
-CC_END_POLICY="${CC_END_POLICY:-}"  # e.g. "AND('Org1MSP.peer','Org2MSP.peer')" — empty means channel default
+CC_END_POLICY="${CC_END_POLICY-AND('Org1MSP.peer','Org2MSP.peer')}"  # empty (CC_END_POLICY=) means channel default
 CCENV_IMAGE="npcioss/drunix-ccenv:1.0"   # NOTE the tag is 1.0, not 1.0.0 like the other images
 
 # Fabric-role containers known (NOTES.md "Final verified topology") to occasionally exit
@@ -274,9 +278,9 @@ Usage: network/net.sh <command>
   up               bring the 11-container network up
   down             tear the network down
   create-channel   create + join '${CHANNEL_NAME}'
-  deploy-cc        deploy chaincode '${CC_NAME}' from its default sample path
-  invoke '<json>' [ccname]   e.g. invoke '{"Args":["InitLedger"]}'
-  query  '<json>' [ccname]   e.g. query  '{"Args":["GetAllAssets"]}'
+  deploy-cc        deploy chaincode '${CC_NAME}' from '${CC_SRC_PATH}'
+  invoke '<json>' [ccname]   e.g. invoke '{"Args":["InitiateEscrow","esc1","500000","payer-ref","payee-ref"]}'
+  query  '<json>' [ccname]   e.g. query  '{"Args":["ReadEscrow","esc1"]}'
   status           container table + quick error scan
   bootstrap        up -> create-channel -> deploy-cc
 

@@ -74,14 +74,33 @@ cd settlemint-drunix
 
 `bootstrap` takes a few minutes the first time (image pulls + YugabyteDB cold start).
 When it finishes you'll have all 11 containers running, `mychannel` created and joined
-by both orgs, and the sample `basic` chaincode installed, approved, and committed.
+by both orgs, and **our own `escrow` chaincode** — not the vendor sample — installed,
+approved, and committed with the dual-org endorsement policy it requires
+(`AND('Org1MSP.peer','Org2MSP.peer')`; see `chaincode/escrow/README.md`).
 
-Then try a transaction:
+Walk an escrow claim through its real lifecycle:
 
 ```bash
-./network/net.sh invoke '{"Args":["InitLedger"]}'
-./network/net.sh query  '{"Args":["GetAllAssets"]}'
+./network/net.sh invoke '{"Args":["InitiateEscrow","esc1","500000","payer-acct-1","payee-acct-1"]}'
+./network/net.sh invoke '{"Args":["LockEscrow","esc1"]}'
+./network/net.sh invoke '{"Args":["ReleaseEscrow","esc1"]}'
+./network/net.sh query  '{"Args":["ReadEscrow","esc1"]}'
 ```
+
+That `ReleaseEscrow` call above succeeds because `net.sh invoke` always gathers
+endorsement from both orgs (`ccutils.sh:chaincodeInvoke`). The core guarantee is that a
+release endorsed by only one org does **not** — proven live, not asserted, by:
+
+```bash
+bash chaincode/escrow/test/integration/live_demo.sh
+```
+
+which locks, releases, and refunds separate escrows (all dual-org endorsed) and then
+deliberately submits a single-org-endorsed release and shows the ledger state doesn't
+move. Captured output from a real run is in
+[`docs/demo-evidence/`](docs/demo-evidence/); `docs/architecture.md` §2–3 has the
+mechanics of why a single-org release fails silently at commit rather than being refused
+up front.
 
 Tear down when done:
 
@@ -143,9 +162,9 @@ nobody has to rediscover them:
 | `up` | Brings the 11-container network up (Workarounds 3, 6) |
 | `down` | Tears it down (Workaround 3) |
 | `create-channel` | Creates + joins `mychannel` on both orgs (Workaround 4) |
-| `deploy-cc` | Pulls the ccenv image and deploys the default sample chaincode (Workarounds 4, 5) |
-| `invoke '<json>' [ccname]` | e.g. `invoke '{"Args":["InitLedger"]}'` |
-| `query '<json>' [ccname]` | e.g. `query '{"Args":["GetAllAssets"]}'` |
+| `deploy-cc` | Pulls the ccenv image and deploys **our `escrow` chaincode** with its dual-org endorsement policy applied (Workarounds 4, 5) — override `CC_NAME`/`CC_SRC_PATH`/`CC_END_POLICY` to deploy something else, e.g. the stock sample |
+| `invoke '<json>' [ccname]` | e.g. `invoke '{"Args":["LockEscrow","esc1"]}'` |
+| `query '<json>' [ccname]` | e.g. `query '{"Args":["ReadEscrow","esc1"]}'` |
 | `status` | Container table + a quick scan of each container's logs for panic/fatal/error |
 | `bootstrap` | `up` → `create-channel` → `deploy-cc` |
 
@@ -158,14 +177,29 @@ chaincode (confirmed in Phase 0.5 — see `docs/architecture.md`). To look at it
 
 ```bash
 docker exec -it yugabyte-org1 sh -c \
-  "PGPASSWORD=yugabyte ysqlsh -h \$(hostname) -U yugabyte -d yugabyte -c 'select * from mychannel.basic;'"
+  "PGPASSWORD=yugabyte ysqlsh -h \$(hostname) -U yugabyte -d yugabyte -c 'select * from mychannel.escrow;'"
 ```
 
 (`-h $(hostname)` is required — connecting via `-h localhost` from *inside* the
 container fails; use the container's own hostname or `127.0.0.1` won't resolve
-correctly against the YSQL listener in this image.)
+correctly against the YSQL listener in this image. Swap `escrow` for `basic` if you
+deployed the stock sample instead — same schema-per-channel, table-per-chaincode
+layout either way. Real captured output from both orgs is in
+[`docs/demo-evidence/`](docs/demo-evidence/).)
 
 ## Next
 
-Phase 2 will fill in `chaincode/escrow/`, `gateway/`, and `web/` with actual business
-logic. Nothing in those directories yet.
+**`chaincode/escrow/` — core done (Phase 2).** The claim state machine
+(`INITIATED -> LOCKED -> RELEASED | REFUNDED`), the dual-org endorsement guarantee on
+the value-moving transitions, and every illegal-transition rejection are implemented,
+unit-tested, and proven live — see `chaincode/escrow/README.md` for what it is (and
+explicitly is not: it never custodies money, only a claim against off-chain funds), and
+[`docs/demo-evidence/`](docs/demo-evidence/) for captured proof. No dispute path, no
+oracle, no private data collections yet — that's next for this directory, not a new one.
+
+**`gateway/` and `web/` — up next.** Nothing built there yet. `gateway/` will be the
+application-layer service submitting/evaluating transactions against `chaincode/escrow`
+through the Fabric Gateway (mind the Lite Peer / Committing Peer split —
+`docs/architecture.md` §2 — when choosing which peer to connect to) and reconciling
+on-chain escrow state with the off-chain rupee movement it references but never
+performs. `web/` will be the frontend talking to `gateway/`.
